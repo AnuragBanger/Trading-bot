@@ -1,0 +1,27 @@
+{
+  "indicator_weights": {
+    "rsi": 0.20,
+    "macd": 0.20,
+    "sma_trend": 0.15,
+    "volume_spike": 0.15,
+    "bollinger": 0.15,
+    "fa_score": 0.15
+  },
+  "thresholds": {
+    "min_confidence_to_trade": 70,
+    "min_fa_score": 60,
+    "rsi_oversold_level": 40,
+    "rsi_overbought_level": 65,
+    "min_volume": 1000000,
+    "min_price": 10,
+    "max_price": 500,
+    "volume_spike_multiplier": 1.5,
+    "max_concurrent_positions": 4,
+    "max_position_pct": 0.25,
+    "take_profit_1_pct": 0.10,
+    "take_profit_2_pct": 0.20,
+    "stop_loss_atr_multiplier": 1.5
+  },
+  "version": 1,
+  "last_updated": null
+}

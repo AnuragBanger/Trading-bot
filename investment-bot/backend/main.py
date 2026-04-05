@@ -1,0 +1,214 @@
+"""
+FastAPI Backend — Investment Advisory Bot
+All API endpoints wired here; scheduler starts on app startup.
+"""
+from __future__ import annotations
+
+import logging
+import sys
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+# Ensure backend directory is on sys.path when running directly
+sys.path.insert(0, str(Path(__file__).parent))
+
+from config import FRONTEND_ORIGIN, load_json, load_parameters
+from config import (
+    PAPER_TRADES_FILE, OUTCOMES_FILE,
+    REFINEMENT_LOG_FILE,
+)
+from modules.outcome_tracker import OutcomeTracker
+from modules.paper_trader import PaperTrader
+from scheduler import (
+    start_scheduler, stop_scheduler,
+    run_cycle, get_state, is_market_open,
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+
+# ── App lifecycle ─────────────────────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Starting investment bot scheduler…")
+    start_scheduler()
+    yield
+    logger.info("Shutting down scheduler…")
+    stop_scheduler()
+
+
+app = FastAPI(
+    title="Investment Advisory Bot",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[FRONTEND_ORIGIN, "http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ── Helper ────────────────────────────────────────────────────────────────────
+
+def _ok(data) -> JSONResponse:
+    return JSONResponse(content={"status": "ok", "data": data})
+
+
+# ── Endpoints ─────────────────────────────────────────────────────────────────
+
+@app.get("/api/dashboard")
+async def dashboard():
+    """Full dashboard snapshot."""
+    trader  = PaperTrader()
+    tracker = OutcomeTracker()
+
+    pt_data    = trader.load()
+    portfolio  = pt_data["portfolio"]
+    positions  = pt_data["active_positions"]
+    stats      = tracker.get_stats()
+    grad       = tracker.graduation_status()
+    sched      = get_state()
+    refine_log = load_json(REFINEMENT_LOG_FILE)
+    last_sigs  = sched.get("last_signals", [])
+
+    return _ok({
+        "portfolio":          portfolio,
+        "active_positions":   positions,
+        "stats":              stats,
+        "graduation":         grad,
+        "market_open":        is_market_open(),
+        "market_context":     sched.get("market_context", {}),
+        "last_signals":       last_sigs[-10:],   # last 10 signals
+        "last_cycle":         sched.get("last_run"),
+        "cycle_count":        sched.get("cycle_count", 0),
+        "total_refinements":  refine_log.get("total_refinements", 0),
+    })
+
+
+@app.get("/api/portfolio")
+async def portfolio():
+    """Current paper portfolio and P&L."""
+    trader   = PaperTrader()
+    pt_data  = trader.load()
+    return _ok(pt_data["portfolio"])
+
+
+@app.get("/api/trades/active")
+async def active_trades():
+    """All open positions."""
+    trader    = PaperTrader()
+    pt_data   = trader.load()
+    positions = pt_data["active_positions"]
+
+    # Refresh current prices inline
+    import yfinance as yf
+    for pos in positions:
+        try:
+            info  = yf.Ticker(pos["ticker"]).fast_info
+            price = getattr(info, "last_price", None)
+            if price:
+                pos["current_price"] = round(float(price), 4)
+                pos["current_value"] = round(pos["shares"] * float(price), 2)
+                pos["pnl"]     = round(pos["current_value"] - pos["cost_basis"], 2)
+                pos["pnl_pct"] = round(
+                    (float(price) - pos["entry_price"]) / pos["entry_price"] * 100, 2
+                )
+        except Exception:
+            pass
+
+    return _ok(positions)
+
+
+@app.get("/api/trades/history")
+async def trade_history():
+    """All closed trades."""
+    tracker = OutcomeTracker()
+    return _ok(tracker.get_all_trades())
+
+
+@app.get("/api/signals")
+async def signals():
+    """Latest buy/sell signals from the last scheduler cycle."""
+    sched = get_state()
+    return _ok(sched.get("last_signals", []))
+
+
+@app.get("/api/performance")
+async def performance():
+    """Win rates, metrics, equity curve."""
+    tracker   = OutcomeTracker()
+    stats     = tracker.get_stats()
+    trader    = PaperTrader()
+    portfolio = trader.load()["portfolio"]
+    return _ok({
+        "stats":        stats,
+        "equity_curve": portfolio.get("equity_curve", []),
+    })
+
+
+@app.get("/api/refinement/log")
+async def refinement_log():
+    """Full history of parameter refinements."""
+    log = load_json(REFINEMENT_LOG_FILE)
+    return _ok(log)
+
+
+@app.get("/api/graduation/status")
+async def graduation_status():
+    """Readiness score and criteria breakdown."""
+    tracker = OutcomeTracker()
+    return _ok(tracker.graduation_status())
+
+
+@app.post("/api/scheduler/run")
+async def manual_run():
+    """Manually trigger one analysis cycle."""
+    sched = get_state()
+    if sched.get("is_running"):
+        raise HTTPException(status_code=409, detail="Cycle already in progress")
+    import asyncio
+    loop    = asyncio.get_event_loop()
+    summary = await loop.run_in_executor(None, run_cycle)
+    return _ok(summary)
+
+
+@app.get("/api/market/context")
+async def market_context():
+    """Current SPY/QQQ trend context."""
+    from modules.ai_engine import get_market_context
+    import asyncio
+    loop    = asyncio.get_event_loop()
+    context = await loop.run_in_executor(None, get_market_context)
+    return _ok(context)
+
+
+@app.get("/api/parameters")
+async def get_parameters():
+    """Current indicator weights and thresholds."""
+    return _ok(load_parameters())
+
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    import uvicorn
+    from config import HOST, PORT
+    uvicorn.run("main:app", host=HOST, port=PORT, reload=False, log_level="info")

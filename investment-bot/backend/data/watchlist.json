@@ -1,0 +1,26 @@
+{
+  "etfs": [
+    "SPY", "QQQ", "VTI", "VOO", "IVV", "ARKK", "XLK", "XLF",
+    "XLE", "XLV", "XLY", "XLC", "GLD", "TLT", "VNQ", "SCHD",
+    "VIG", "JEPI", "QQQM", "SPHD"
+  ],
+  "sp500_sample": [
+    "AAPL", "MSFT", "AMZN", "NVDA", "GOOGL", "META", "TSLA", "BRK-B",
+    "UNH", "LLY", "JPM", "V", "XOM", "MA", "AVGO", "PG", "JNJ", "HD",
+    "MRK", "ABBV", "COST", "CVX", "ORCL", "BAC", "KO", "PEP", "TMO",
+    "ACN", "WMT", "MCD", "ABT", "CSCO", "NFLX", "CRM", "DHR", "NKE",
+    "TXN", "PM", "MS", "NEE", "RTX", "INTC", "AMGN", "UPS", "BMY",
+    "IBM", "QCOM", "SPGI", "LOW", "GS", "ELV", "PLD", "CAT", "DE",
+    "AXP", "BLK", "SYK", "ADI", "MDLZ", "GILD", "ADP", "VRTX", "TJX",
+    "C", "MMC", "AMT", "PNC", "ZTS", "CI", "SO", "DUK", "MO", "ETN",
+    "ISRG", "HCA", "AON", "CL", "TGT", "SHW", "F", "GM", "FCX", "NSC"
+  ],
+  "nasdaq100_sample": [
+    "AAPL", "MSFT", "AMZN", "NVDA", "GOOGL", "META", "TSLA", "AVGO",
+    "COST", "NFLX", "AMD", "ADBE", "QCOM", "INTU", "AMAT", "MU",
+    "BKNG", "LRCX", "SNPS", "CDNS", "KLAC", "MRVL", "PANW", "CRWD",
+    "ASML", "ABNB", "ORLY", "MELI", "FTNT", "AZN", "CTAS", "PCAR",
+    "DXCM", "ROST", "WDAY", "CHTR", "SGEN", "ODFL", "FAST", "TEAM"
+  ],
+  "last_updated": null
+}

@@ -1,0 +1,171 @@
+import React, { useState } from 'react';
+import PortfolioOverview from './PortfolioOverview';
+import ActiveTrades from './ActiveTrades';
+import SignalFeed from './SignalFeed';
+import PerformanceChart from './PerformanceChart';
+import RefinementLog from './RefinementLog';
+import GraduationStatus from './GraduationStatus';
+
+const NAV_ITEMS = [
+  { id: 'overview',    label: 'PORTFOLIO' },
+  { id: 'trades',      label: 'POSITIONS' },
+  { id: 'signals',     label: 'SIGNALS' },
+  { id: 'performance', label: 'PERFORMANCE' },
+  { id: 'refinement',  label: 'REFINEMENT' },
+  { id: 'graduation',  label: 'GRADUATION' },
+];
+
+const STATUS_COLORS = {
+  learning:  { bg: '#1a2744', text: '#60a5fa', dot: '#3b82f6' },
+  improving: { bg: '#1a2f1a', text: '#4ade80', dot: '#22c55e' },
+  ready:     { bg: '#2a1a0a', text: '#fb923c', dot: '#f97316' },
+};
+
+export default function Dashboard({ data, lastRefresh, onRefresh, onTriggerCycle, apiBase }) {
+  const [activeTab, setActiveTab] = useState('overview');
+
+  const status       = data.graduation?.status || 'learning';
+  const statusColors = STATUS_COLORS[status] || STATUS_COLORS.learning;
+  const marketOpen   = data.market_open;
+
+  return (
+    <div style={{ maxWidth: 1400, margin: '0 auto', padding: '0 16px' }}>
+
+      {/* ── Header ────────────────────────────────────────────────────────── */}
+      <header style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '16px 0', borderBottom: '1px solid #1e293b',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <span style={{ fontSize: 24 }}>⚡</span>
+          <div>
+            <h1 style={{ margin: 0, fontSize: 18, color: '#00d4ff', letterSpacing: 2, fontWeight: 700 }}>
+              INVESTMENT ADVISORY BOT
+            </h1>
+            <p style={{ margin: 0, fontSize: 11, color: '#475569', letterSpacing: 1 }}>
+              PAPER TRADING ENGINE v1.0
+            </p>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+          {/* Market status */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div style={{
+              width: 8, height: 8, borderRadius: '50%',
+              background: marketOpen ? '#22c55e' : '#64748b',
+              boxShadow: marketOpen ? '0 0 6px #22c55e' : 'none',
+            }} />
+            <span style={{ fontSize: 11, color: marketOpen ? '#22c55e' : '#64748b', letterSpacing: 1 }}>
+              MARKET {marketOpen ? 'OPEN' : 'CLOSED'}
+            </span>
+          </div>
+
+          {/* Bot status badge */}
+          <div style={{
+            padding: '4px 10px', borderRadius: 4,
+            background: statusColors.bg,
+            border: `1px solid ${statusColors.dot}`,
+            display: 'flex', alignItems: 'center', gap: 6,
+          }}>
+            <div style={{ width: 6, height: 6, borderRadius: '50%', background: statusColors.dot, boxShadow: `0 0 4px ${statusColors.dot}` }} />
+            <span style={{ fontSize: 11, color: statusColors.text, letterSpacing: 1, textTransform: 'uppercase' }}>
+              {status}
+            </span>
+          </div>
+
+          {/* Cycle info */}
+          <div style={{ textAlign: 'right' }}>
+            <div style={{ fontSize: 11, color: '#475569' }}>
+              Cycle #{data.cycle_count || 0}
+            </div>
+            <div style={{ fontSize: 10, color: '#334155' }}>
+              {lastRefresh ? lastRefresh.toLocaleTimeString() : '—'}
+            </div>
+          </div>
+
+          {/* Action buttons */}
+          <button onClick={onRefresh} style={btnStyle('#1e293b', '#94a3b8')}>REFRESH</button>
+          <button onClick={onTriggerCycle} style={btnStyle('#0c1e40', '#00d4ff')}>▶ RUN CYCLE</button>
+        </div>
+      </header>
+
+      {/* ── Top-line KPIs ─────────────────────────────────────────────────── */}
+      <TopKpis portfolio={data.portfolio} stats={data.stats} />
+
+      {/* ── Navigation ───────────────────────────────────────────────────── */}
+      <nav style={{ display: 'flex', gap: 2, marginTop: 20, borderBottom: '1px solid #1e293b' }}>
+        {NAV_ITEMS.map(item => (
+          <button
+            key={item.id}
+            onClick={() => setActiveTab(item.id)}
+            style={{
+              padding: '8px 18px',
+              background: activeTab === item.id ? '#0f172a' : 'transparent',
+              color: activeTab === item.id ? '#00d4ff' : '#475569',
+              border: 'none',
+              borderBottom: activeTab === item.id ? '2px solid #00d4ff' : '2px solid transparent',
+              cursor: 'pointer',
+              fontSize: 11,
+              letterSpacing: 2,
+              fontFamily: 'inherit',
+              transition: 'all 0.15s',
+            }}
+          >
+            {item.label}
+          </button>
+        ))}
+      </nav>
+
+      {/* ── Panel content ─────────────────────────────────────────────────── */}
+      <main style={{ paddingTop: 20, paddingBottom: 40 }}>
+        {activeTab === 'overview'    && <PortfolioOverview portfolio={data.portfolio} />}
+        {activeTab === 'trades'      && <ActiveTrades positions={data.active_positions} />}
+        {activeTab === 'signals'     && <SignalFeed signals={data.last_signals} apiBase={apiBase} />}
+        {activeTab === 'performance' && <PerformanceChart stats={data.stats} portfolio={data.portfolio} apiBase={apiBase} />}
+        {activeTab === 'refinement'  && <RefinementLog apiBase={apiBase} />}
+        {activeTab === 'graduation'  && <GraduationStatus graduation={data.graduation} />}
+      </main>
+    </div>
+  );
+}
+
+function TopKpis({ portfolio, stats }) {
+  const p   = portfolio || {};
+  const pnl = p.total_pnl ?? 0;
+  const pnlPct = p.total_pnl_pct ?? 0;
+  const pnlColor = pnl >= 0 ? '#22c55e' : '#f87171';
+
+  const kpis = [
+    { label: 'TOTAL VALUE',    value: `$${(p.total_value ?? 0).toFixed(2)}`,   sub: `Started $${(p.starting_capital ?? 500).toFixed(0)}` },
+    { label: 'TOTAL P&L',      value: `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`, sub: `${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%`, color: pnlColor },
+    { label: 'AVAILABLE CASH', value: `$${(p.available_cash ?? 0).toFixed(2)}`, sub: `${((p.available_cash ?? 0) / (p.total_value || 1) * 100).toFixed(0)}% of portfolio` },
+    { label: 'WIN RATE',       value: `${(stats?.win_rate ?? 0).toFixed(1)}%`, sub: `${stats?.winning_trades ?? 0}W / ${stats?.losing_trades ?? 0}L`, color: (stats?.win_rate ?? 0) >= 60 ? '#22c55e' : '#f59e0b' },
+    { label: 'AVG WIN',        value: `+${(stats?.avg_win_pct ?? 0).toFixed(2)}%`, sub: 'per winning trade', color: '#22c55e' },
+    { label: 'AVG LOSS',       value: `-${(stats?.avg_loss_pct ?? 0).toFixed(2)}%`, sub: 'per losing trade', color: '#f87171' },
+  ];
+
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 12, marginTop: 16 }}>
+      {kpis.map(k => (
+        <div key={k.label} style={{
+          background: '#0f172a', border: '1px solid #1e293b',
+          borderRadius: 8, padding: '14px 16px',
+        }}>
+          <div style={{ fontSize: 10, color: '#475569', letterSpacing: 2, marginBottom: 6 }}>{k.label}</div>
+          <div style={{ fontSize: 20, fontWeight: 700, color: k.color || '#e2e8f0' }}>{k.value}</div>
+          <div style={{ fontSize: 11, color: '#334155', marginTop: 4 }}>{k.sub}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function btnStyle(bg, color) {
+  return {
+    padding: '6px 14px', background: bg, color,
+    border: `1px solid ${color}`, borderRadius: 4,
+    cursor: 'pointer', fontSize: 11, letterSpacing: 1,
+    fontFamily: 'inherit',
+  };
+}

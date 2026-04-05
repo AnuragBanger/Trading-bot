@@ -1,0 +1,19 @@
+{
+  "portfolio": {
+    "starting_capital": 500.0,
+    "total_deposited": 500.0,
+    "available_cash": 500.0,
+    "invested_amount": 0.0,
+    "total_value": 500.0,
+    "total_pnl": 0.0,
+    "total_pnl_pct": 0.0,
+    "monthly_deposits": [
+      {"date": "2026-04-01", "amount": 500.0}
+    ],
+    "equity_curve": [
+      {"date": "2026-04-01", "value": 500.0}
+    ]
+  },
+  "active_positions": [],
+  "last_updated": null
+}

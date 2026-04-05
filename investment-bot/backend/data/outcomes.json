@@ -1,0 +1,21 @@
+{
+  "closed_trades": [],
+  "stats": {
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "breakeven_trades": 0,
+    "win_rate": 0.0,
+    "avg_win_pct": 0.0,
+    "avg_loss_pct": 0.0,
+    "by_indicator": {},
+    "by_sector": {},
+    "by_market_condition": {
+      "bull": {"trades": 0, "wins": 0},
+      "bear": {"trades": 0, "wins": 0},
+      "sideways": {"trades": 0, "wins": 0}
+    },
+    "monthly_performance": [],
+    "trades_since_last_refinement": 0
+  }
+}
