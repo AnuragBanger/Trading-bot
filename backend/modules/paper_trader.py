@@ -14,9 +14,10 @@ import yfinance as yf
 
 from config import (
     load_json, save_json,
-    PAPER_TRADES_FILE, MONTHLY_BUDGET,
+    PAPER_TRADES_FILE, MONTHLY_BUDGET, OUTCOMES_FILE,
     load_parameters,
 )
+from modules.position_sizer import kelly_position_size
 
 logger = logging.getLogger(__name__)
 
@@ -90,8 +91,21 @@ class PaperTrader:
         if available <= 0:
             return None
 
-        # Position size
-        size_pct   = min(signal.get("position_size_pct", 0.20), thresholds["max_position_pct"])
+        # Kelly Criterion position sizing (overrides Claude's flat suggestion)
+        outcomes_data = load_json(OUTCOMES_FILE)
+        stats = outcomes_data.get("stats", {})
+        ta_snap = signal.get("_ta_snapshot", {})
+        kelly_pct = kelly_position_size(
+            win_rate=stats.get("win_rate", 0.0),
+            avg_win_pct=stats.get("avg_win_pct", 0.0),
+            avg_loss_pct=stats.get("avg_loss_pct", 0.0),
+            total_trades=stats.get("total_trades", 0),
+            atr=ta_snap.get("atr"),
+            current_price=ta_snap.get("current_price"),
+            signal_confidence=float(signal.get("confidence", 70)),
+            max_pct=thresholds["max_position_pct"],
+        )
+        size_pct   = kelly_pct
         total_value= portfolio["total_value"]
         budget     = total_value * size_pct
         budget     = min(budget, available)
@@ -139,8 +153,10 @@ class PaperTrader:
         self._refresh_portfolio_totals(data)
         self.save(data)
 
-        logger.info("Opened position: %s @ $%.4f, %g shares, cost $%.2f",
-                    position["ticker"], entry_price, shares, position["cost_basis"])
+        logger.info(
+            "Opened position: %s @ $%.4f, %g shares, cost $%.2f (Kelly size=%.1f%%)",
+            position["ticker"], entry_price, shares, position["cost_basis"], size_pct * 100,
+        )
         return position
 
     # ── Monitor all open positions ────────────────────────────────────────────

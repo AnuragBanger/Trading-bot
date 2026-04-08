@@ -141,6 +141,98 @@ class TechnicalAnalyzer:
             logger.warning("Failed to fetch OHLCV for %s: %s", ticker, exc)
             return None
 
+    # ── Weekly timeframe analysis ─────────────────────────────────────────────
+
+    def analyze_weekly(self, ticker: str) -> dict[str, Any] | None:
+        """
+        Compute weekly-timeframe indicators for multi-timeframe confirmation.
+        Uses 3 years of weekly data to support SMA50 and SMA100.
+
+        Returns a dict with weekly TA snapshot, or None if data unavailable.
+        """
+        df = self._fetch_ohlcv(ticker, period="3y", interval="1wk")
+        if df is None or len(df) < 20:
+            return None
+
+        result: dict[str, Any] = {"ticker": ticker, "timeframe": "weekly"}
+
+        current_price = float(df["Close"].iloc[-1])
+        result["current_price"] = round(current_price, 4)
+
+        # Weekly RSI(14)
+        rsi = ta.rsi(df["Close"], length=14)
+        result["rsi_weekly"] = round(float(rsi.iloc[-1]), 2) if rsi is not None and not rsi.empty else None
+
+        # Weekly MACD direction (trend, not crossover)
+        macd_df = ta.macd(df["Close"], fast=12, slow=26, signal=9)
+        if macd_df is not None and not macd_df.empty:
+            hist = float(macd_df["MACDh_12_26_9"].iloc[-1])
+            result["macd_weekly_histogram"] = round(hist, 4)
+            result["macd_weekly_trend"] = "bullish" if hist > 0 else "bearish"
+        else:
+            result["macd_weekly_histogram"] = None
+            result["macd_weekly_trend"] = "neutral"
+
+        # Weekly SMA20 and SMA50
+        sma20w = ta.sma(df["Close"], length=20)
+        sma50w = ta.sma(df["Close"], length=50)
+        result["sma20_weekly"] = round(float(sma20w.iloc[-1]), 4) if sma20w is not None and not sma20w.empty else None
+        result["sma50_weekly"] = round(float(sma50w.iloc[-1]), 4) if sma50w is not None and not sma50w.empty else None
+        result["above_sma20_weekly"] = (current_price > result["sma20_weekly"]) if result["sma20_weekly"] else False
+        result["above_sma50_weekly"] = (current_price > result["sma50_weekly"]) if result["sma50_weekly"] else False
+
+        # Weekly ATR (volatility context)
+        atr_w = ta.atr(df["High"], df["Low"], df["Close"], length=14)
+        result["atr_weekly"] = round(float(atr_w.iloc[-1]), 4) if atr_w is not None and not atr_w.empty else None
+
+        return result
+
+    def get_timeframe_alignment(
+        self, daily_ta: dict, weekly_ta: dict | None
+    ) -> str:
+        """
+        Combine daily + weekly signals to classify the multi-timeframe trend.
+
+        Returns one of:
+          "strong_bull" — both timeframes clearly bullish
+          "bull"        — weekly uptrend + daily either bullish or neutral
+          "neutral"     — mixed signals
+          "bear"        — weekly downtrend or conflicting signals
+          "strong_bear" — both timeframes clearly bearish
+        """
+        if weekly_ta is None:
+            # No weekly data: classify from daily only
+            above200 = daily_ta.get("above_sma200", False)
+            above50  = daily_ta.get("above_sma50",  False)
+            macd_sig = daily_ta.get("macd_signal",  "neutral")
+            if above200 and above50 and macd_sig == "bullish":
+                return "bull"
+            if not above200 and not above50:
+                return "bear"
+            return "neutral"
+
+        above50w  = weekly_ta.get("above_sma50_weekly", False)
+        above20w  = weekly_ta.get("above_sma20_weekly", False)
+        rsi_w     = weekly_ta.get("rsi_weekly") or 50.0
+        macd_w    = weekly_ta.get("macd_weekly_trend", "neutral")
+        above200d = daily_ta.get("above_sma200", False)
+        above50d  = daily_ta.get("above_sma50",  False)
+
+        bull_weekly = above50w and above20w and rsi_w > 45 and macd_w == "bullish"
+        bear_weekly = not above50w and not above20w and rsi_w < 55 and macd_w == "bearish"
+        bull_daily  = above200d and above50d
+        bear_daily  = not above200d and not above50d
+
+        if bull_weekly and bull_daily:
+            return "strong_bull"
+        if bull_weekly and not bear_daily:
+            return "bull"
+        if bear_weekly and bear_daily:
+            return "strong_bear"
+        if bear_weekly:
+            return "bear"
+        return "neutral"
+
     def compute_signals_list(self, ta_data: dict) -> list[str]:
         """Convert TA snapshot into a list of signal strings for the AI engine."""
         signals: list[str] = []

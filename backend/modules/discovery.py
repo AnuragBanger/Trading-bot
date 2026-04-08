@@ -14,6 +14,7 @@ import yfinance as yf
 from config import load_json, load_parameters, WATCHLIST_FILE
 from modules.technical import TechnicalAnalyzer
 from modules.fundamental import FundamentalAnalyzer
+from modules.earnings_guard import is_earnings_risk
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,19 @@ class DiscoveryModule:
         if fa_score < thresholds["min_fa_score"]:
             return None
 
+        # Earnings risk check — skip tickers within 5 trading days of earnings
+        if asset_type == "stock":
+            earnings_info = is_earnings_risk(ticker)
+            if earnings_info["blocked"]:
+                logger.info(
+                    "Skipping %s — earnings risk: %s (earnings %s, %s trading days away)",
+                    ticker,
+                    earnings_info["reason"],
+                    earnings_info.get("earnings_date", "unknown"),
+                    earnings_info.get("trading_days_away", "?"),
+                )
+                return None
+
         # Technical snapshot (lightweight — just RSI for filtering)
         ta_data = self.ta.analyze(ticker)
         if ta_data is None:
@@ -101,15 +115,23 @@ class DiscoveryModule:
         # Composite score for ranking
         composite = self._composite_score(fa_score, rsi, ta_data)
 
+        # Flag existing positions for review if earnings are imminent (≤2 days)
+        earnings_warning = None
+        if asset_type == "stock":
+            einfo = is_earnings_risk(ticker)
+            if einfo["flag_for_review"]:
+                earnings_warning = einfo
+
         return {
-            "ticker": ticker,
-            "type": asset_type,
-            "price": price,
-            "volume": volume,
-            "fa_score": fa_score,
-            "rsi": rsi,
-            "ta_snapshot": ta_data,
-            "composite_score": composite,
+            "ticker":           ticker,
+            "type":             asset_type,
+            "price":            price,
+            "volume":           volume,
+            "fa_score":         fa_score,
+            "rsi":              rsi,
+            "ta_snapshot":      ta_data,
+            "composite_score":  composite,
+            "earnings_warning": earnings_warning,
         }
 
     def _composite_score(self, fa_score: float, rsi: float | None, ta: dict) -> float:

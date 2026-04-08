@@ -12,6 +12,8 @@ from typing import Any
 import anthropic
 
 from config import ANTHROPIC_API_KEY, CLAUDE_MODEL, load_parameters, load_json, OUTCOMES_FILE
+from modules.sentiment import get_sentiment
+from modules.technical import TechnicalAnalyzer
 
 logger = logging.getLogger(__name__)
 
@@ -81,8 +83,30 @@ def generate_signal(
     params = load_parameters()
     outcomes_data = load_json(OUTCOMES_FILE)
 
+    # Fetch sentiment data (cached 30 min — cheap to call every cycle)
+    sentiment_data: dict[str, Any] = {}
+    try:
+        sentiment_data = get_sentiment(ticker)
+    except Exception as exc:
+        logger.warning("Sentiment fetch failed for %s: %s", ticker, exc)
+
+    # Weekly timeframe analysis for multi-timeframe confirmation
+    weekly_ta: dict[str, Any] | None = None
+    timeframe_alignment = "neutral"
+    try:
+        _ta = TechnicalAnalyzer()
+        weekly_ta = _ta.analyze_weekly(ticker)
+        timeframe_alignment = _ta.get_timeframe_alignment(ta_data, weekly_ta)
+    except Exception as exc:
+        logger.warning("Weekly TA failed for %s: %s", ticker, exc)
+
     system_prompt = _build_system_prompt(params, market_context, outcomes_data)
-    user_message  = _build_user_message(ticker, asset_type, ta_data, fa_data, key_signals)
+    user_message  = _build_user_message(
+        ticker, asset_type, ta_data, fa_data, key_signals,
+        sentiment_data=sentiment_data,
+        weekly_ta=weekly_ta,
+        timeframe_alignment=timeframe_alignment,
+    )
 
     logger.info("Requesting signal from Claude for %s", ticker)
     try:
@@ -157,6 +181,12 @@ RULES:
 6. signal must be "buy", "hold", or "sell".
 7. confidence 0-100 — only generate "buy" if confidence >= {thresholds['min_confidence_to_trade']}.
 8. risk_level: "low" if confidence >= 80, "medium" if >= 65, else "high".
+9. TIMEFRAME ALIGNMENT: Only generate "buy" if timeframe_alignment is "bull" or "strong_bull".
+   If alignment is "bear" or "strong_bear", prefer "hold" or reduce confidence by 20 points.
+10. SENTIMENT: If sentiment_label is "bearish" with key negative events, reduce confidence by 10-15.
+    If sentiment_label is "bullish" with positive events (beat_earnings, raised_guidance), increase confidence by 5-10.
+    If key_events contains any high-impact events (fda_decision, merger_announced, acquisition_target),
+    set risk_level to "high" regardless of confidence.
 
 JSON SCHEMA (respond with ONLY this):
 {{
@@ -181,10 +211,36 @@ def _build_user_message(
     ta_data: dict,
     fa_data: dict,
     key_signals: list[str],
+    sentiment_data: dict | None = None,
+    weekly_ta: dict | None = None,
+    timeframe_alignment: str = "neutral",
 ) -> str:
+    # Build weekly section
+    if weekly_ta:
+        weekly_section = f"""
+WEEKLY TIMEFRAME (multi-timeframe confirmation):
+- Weekly RSI(14): {weekly_ta.get('rsi_weekly')}
+- Weekly MACD Trend: {weekly_ta.get('macd_weekly_trend')} (histogram: {weekly_ta.get('macd_weekly_histogram')})
+- Above Weekly SMA20: {weekly_ta.get('above_sma20_weekly')}, SMA50: {weekly_ta.get('above_sma50_weekly')}
+- Weekly ATR: {weekly_ta.get('atr_weekly')}
+- TIMEFRAME ALIGNMENT: {timeframe_alignment.upper()}"""
+    else:
+        weekly_section = f"\nTIMEFRAME ALIGNMENT: {timeframe_alignment.upper()} (weekly data unavailable)"
+
+    # Build sentiment section
+    if sentiment_data and sentiment_data.get("headline_count", 0) > 0:
+        sentiment_section = f"""
+NEWS SENTIMENT:
+- Sentiment Score: {sentiment_data.get('sentiment_score', 0.0):.2f} ({sentiment_data.get('sentiment_label', 'neutral').upper()})
+- Headlines Analyzed: {sentiment_data.get('headline_count', 0)}
+- Key Events Detected: {sentiment_data.get('key_events', [])}
+- Sources: {', '.join(sentiment_data.get('sources_used', []))}"""
+    else:
+        sentiment_section = "\nNEWS SENTIMENT: No recent headlines found (treat as neutral)"
+
     return f"""Analyze {ticker} ({asset_type.upper()}) and generate a trade signal.
 
-TECHNICAL ANALYSIS DATA:
+DAILY TECHNICAL ANALYSIS:
 - Current Price: {ta_data.get('current_price')}
 - RSI(14): {ta_data.get('rsi')}
 - MACD: {ta_data.get('macd')}, Signal: {ta_data.get('macd_signal_line')}, Histogram: {ta_data.get('macd_histogram')}
@@ -198,10 +254,12 @@ TECHNICAL ANALYSIS DATA:
 - BB Signal: {ta_data.get('bb_signal')}, BB %: {ta_data.get('bb_pct')}
 - Volume Ratio: {ta_data.get('volume_ratio')}, Volume Spike: {ta_data.get('volume_spike')}
 - Support: {ta_data.get('support')}, Resistance: {ta_data.get('resistance')}
+{weekly_section}
+{sentiment_section}
 
 FUNDAMENTAL DATA:
 {json.dumps(fa_data, indent=2, default=str)}
 
 KEY TECHNICAL SIGNALS DETECTED: {key_signals}
 
-Based on all this data, provide your trade signal JSON now."""
+Based on all this data (daily TA, weekly alignment, sentiment, and fundamentals), provide your trade signal JSON now."""
