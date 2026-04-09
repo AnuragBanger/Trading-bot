@@ -29,6 +29,9 @@ export default function PerformanceChart({ stats, portfolio, apiBase }) {
         <RiskReward avgWin={avgWin} avgLoss={avgLoss} />
       </div>
 
+      {/* Risk-adjusted metrics panel */}
+      <RiskMetricsPanel stats={s} />
+
       {/* Equity Curve */}
       {curve.length > 1 && (
         <div style={card}>
@@ -244,6 +247,55 @@ function MiniChart({ data, valueKey, height }) {
         <span>${firstVal?.toFixed(2)}</span>
         <span style={{ color: isUp ? '#22c55e' : '#f87171' }}>${lastVal?.toFixed(2)}</span>
       </div>
+    </div>
+  );
+}
+
+function RiskMetricsPanel({ stats: s }) {
+  const sharpe   = s.sharpe_ratio;
+  const sortino  = s.sortino_ratio;
+  const pf       = s.profit_factor;
+  const exp      = s.expectancy_pct;
+  const maxDD    = s.max_drawdown_pct;
+  const conLoss  = s.max_consecutive_losses;
+  const conWin   = s.max_consecutive_wins;
+
+  if (sharpe == null && pf == null) return null;
+
+  const metricColor = (val, goodThresh, badThresh, lowerIsBetter = false) => {
+    if (val == null) return '#475569';
+    if (lowerIsBetter) return val <= goodThresh ? '#22c55e' : val <= badThresh ? '#f59e0b' : '#f87171';
+    return val >= goodThresh ? '#22c55e' : val >= badThresh ? '#f59e0b' : '#f87171';
+  };
+
+  const metrics = [
+    { label: 'SHARPE RATIO',      value: sharpe  != null ? sharpe.toFixed(2)  : 'N/A', color: metricColor(sharpe, 1.0, 0.5),  target: '> 1.0', desc: 'Risk-adj. return' },
+    { label: 'SORTINO RATIO',     value: sortino != null ? sortino.toFixed(2) : 'N/A', color: metricColor(sortino, 1.0, 0.5), target: '> 1.0', desc: 'Downside-adj. return' },
+    { label: 'PROFIT FACTOR',     value: pf      != null ? pf.toFixed(2)      : 'N/A', color: metricColor(pf, 1.3, 1.0),      target: '> 1.3', desc: 'Gross win / gross loss' },
+    { label: 'EXPECTANCY',        value: exp     != null ? `${exp.toFixed(2)}%` : 'N/A', color: metricColor(exp, 1.0, 0),     target: '> 0%',  desc: 'Avg profit per trade' },
+    { label: 'MAX DRAWDOWN',      value: maxDD   != null ? `${maxDD.toFixed(1)}%` : 'N/A', color: metricColor(maxDD, 10, 20, true), target: '< 15%', desc: 'Cumulative peak to trough' },
+    { label: 'MAX CONSEC. LOSSES',value: conLoss != null ? conLoss : 'N/A',   color: metricColor(conLoss, 2, 4, true),       target: '≤ 3',   desc: 'Consecutive losing trades' },
+  ];
+
+  return (
+    <div style={card}>
+      <SectionTitle>Risk-Adjusted Metrics</SectionTitle>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 12, marginTop: 8 }}>
+        {metrics.map(m => (
+          <div key={m.label} style={{ background: '#0a0e1a', borderRadius: 6, padding: '12px 10px', border: `1px solid ${m.color}33` }}>
+            <div style={{ fontSize: 9, color: '#475569', letterSpacing: 1, marginBottom: 6 }}>{m.label}</div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: m.color }}>{m.value}</div>
+            <div style={{ fontSize: 9, color: '#334155', marginTop: 4 }}>Target: {m.target}</div>
+            <div style={{ fontSize: 9, color: '#1e3a5f', marginTop: 2 }}>{m.desc}</div>
+          </div>
+        ))}
+      </div>
+      {conWin != null && conLoss != null && (
+        <div style={{ display: 'flex', gap: 16, marginTop: 12, fontSize: 11, color: '#64748b' }}>
+          <span>Max win streak: <strong style={{ color: '#22c55e' }}>{conWin}</strong></span>
+          <span>Max loss streak: <strong style={{ color: '#f87171' }}>{conLoss}</strong></span>
+        </div>
+      )}
     </div>
   );
 }

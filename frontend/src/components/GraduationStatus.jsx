@@ -30,7 +30,7 @@ export default function GraduationStatus({ graduation }) {
   const criteria  = g.criteria  || {};
   const cfg       = STATUS_CONFIG[status] || STATUS_CONFIG.learning;
   const metCount  = g.met_count || 0;
-  const total     = g.total_criteria || 4;
+  const total     = g.total_criteria || 6;
   const progress  = (metCount / total) * 100;
 
   return (
@@ -66,7 +66,7 @@ export default function GraduationStatus({ graduation }) {
       {/* Criteria breakdown */}
       <div style={card}>
         <h3 style={{ margin: '0 0 20px', fontSize: 12, color: '#00d4ff', letterSpacing: 2 }}>GRADUATION CRITERIA</h3>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 16 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16 }}>
 
           <CriterionCard
             title="Win Rate ≥ 60%"
@@ -93,6 +93,18 @@ export default function GraduationStatus({ graduation }) {
             criterion={criteria.min_20_closed_trades}
             format={v => `${v} trades`}
           />
+          <CriterionCard
+            title="Sharpe Ratio > 1.0"
+            description="Risk-adjusted return (annualised)"
+            criterion={criteria.sharpe_ratio_over_1}
+            format={v => v != null ? v.toFixed(2) : 'N/A'}
+          />
+          <CriterionCard
+            title="Profit Factor > 1.3"
+            description="Gross wins ÷ gross losses"
+            criterion={criteria.profit_factor_over_1_3}
+            format={v => v != null ? v.toFixed(2) : 'N/A'}
+          />
         </div>
       </div>
 
@@ -103,9 +115,12 @@ export default function GraduationStatus({ graduation }) {
           <StatBox label="Overall Win Rate"  value={`${(g.overall_win_rate || 0).toFixed(1)}%`}  target="60%" met={(g.overall_win_rate || 0) >= 60} />
           <StatBox label="Last 20 Win Rate"  value={`${(g.last20_win_rate || 0).toFixed(1)}%`}   target="60%" met={(g.last20_win_rate || 0) >= 60} />
           <StatBox label="Total Trades"      value={g.total_trades || 0}                           target="20"  met={(g.total_trades || 0) >= 20} />
-          <StatBox label="Avg Win"           value={`+${(g.avg_win_pct || 0).toFixed(2)}%`}      target=">0%" met={(g.avg_win_pct || 0) > 0} />
+          <StatBox label="Met / Total"       value={`${g.met_count || 0} / ${g.total_criteria || 6}`} target="6/6" met={(g.met_count || 0) >= 6} />
+          <StatBox label="Avg Win"           value={`+${(g.avg_win_pct || 0).toFixed(2)}%`}      target=">0%"  met={(g.avg_win_pct || 0) > 0} />
           <StatBox label="Avg Loss"          value={`-${(g.avg_loss_pct || 0).toFixed(2)}%`}     target="<15%" met={(g.avg_loss_pct || 0) < 15} />
-          <StatBox label="Trades Remaining"  value={g.trades_remaining || 0}                       target="0"   met={(g.trades_remaining || 0) === 0} />
+          <StatBox label="Trades Remaining"  value={g.trades_remaining || 0}                       target="0"    met={(g.trades_remaining || 0) === 0} />
+          <StatBox label="Sharpe Ratio"      value={g.sharpe_ratio != null ? g.sharpe_ratio.toFixed(2) : 'N/A'} target=">1.0" met={(g.sharpe_ratio || 0) > 1.0} />
+          <StatBox label="Profit Factor"     value={g.profit_factor != null ? g.profit_factor.toFixed(2) : 'N/A'} target=">1.3" met={(g.profit_factor || 0) > 1.3} />
         </div>
       </div>
 
