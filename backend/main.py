@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections import deque
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -29,10 +31,35 @@ from scheduler import (
     run_cycle, get_state, is_market_open,
 )
 
+# ── In-memory log buffer (last 300 lines, accessible via /api/logs) ───────────
+
+class _MemoryHandler(logging.Handler):
+    """Keeps the most recent log records in a thread-safe deque."""
+    def __init__(self, maxlen: int = 300):
+        super().__init__()
+        self._buf: deque[dict] = deque(maxlen=maxlen)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self._buf.append({
+            "ts":      datetime.now(timezone.utc).isoformat(),
+            "level":   record.levelname,
+            "name":    record.name,
+            "message": record.getMessage(),
+        })
+
+    def get_logs(self, limit: int = 100) -> list[dict]:
+        return list(self._buf)[-limit:]
+
+
+_mem_handler = _MemoryHandler(maxlen=300)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
 )
+# Attach memory handler to root logger so every module's logs are captured
+logging.getLogger().addHandler(_mem_handler)
+
 logger = logging.getLogger(__name__)
 
 
@@ -97,6 +124,7 @@ async def dashboard():
         "last_cycle":         sched.get("last_run"),
         "cycle_count":        sched.get("cycle_count", 0),
         "total_refinements":  refine_log.get("total_refinements", 0),
+        "is_running":         sched.get("is_running", False),
     })
 
 
@@ -176,14 +204,19 @@ async def graduation_status():
 
 
 @app.post("/api/scheduler/run")
-async def manual_run():
-    """Manually trigger one analysis cycle."""
+async def manual_run(force: bool = False):
+    """
+    Manually trigger one analysis cycle.
+
+    Query param:
+      force=true  — run discovery + signals even outside market hours (for testing)
+    """
     sched = get_state()
     if sched.get("is_running"):
         raise HTTPException(status_code=409, detail="Cycle already in progress")
     import asyncio
     loop    = asyncio.get_event_loop()
-    summary = await loop.run_in_executor(None, run_cycle)
+    summary = await loop.run_in_executor(None, run_cycle, force)
     return _ok(summary)
 
 
@@ -353,6 +386,12 @@ async def get_alerts(limit: int = 50):
     """Return the most recent alerts (circuit breaker, stop-loss, refinement, graduation)."""
     from modules.alerter import get_alerts as _get_alerts
     return _ok(_get_alerts(limit=limit))
+
+
+@app.get("/api/logs")
+async def get_logs(limit: int = 100):
+    """Return the most recent in-memory log lines (newest last)."""
+    return _ok(_mem_handler.get_logs(limit=limit))
 
 
 @app.get("/health")

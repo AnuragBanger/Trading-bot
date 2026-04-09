@@ -77,10 +77,17 @@ def is_market_open() -> bool:
 
 # ── Main analysis cycle ───────────────────────────────────────────────────────
 
-def run_cycle() -> dict[str, Any]:
+def run_cycle(force: bool = False) -> dict[str, Any]:
     """
     Execute one full analysis cycle.
     Safe to call manually (e.g. via the API).
+
+    Parameters
+    ----------
+    force : bool
+        When True, runs discovery + signal generation even outside market hours.
+        Useful for testing and manual inspection.
+
     Returns a summary dict.
     """
     if _state["is_running"]:
@@ -129,8 +136,8 @@ def run_cycle() -> dict[str, Any]:
                         exit_reason=c["exit_reason"],
                     )
 
-        # ── Discovery + signals — only during market hours ────────────────
-        if is_market_open():
+        # ── Discovery + signals — market hours only, or forced manually ─────
+        if is_market_open() or force:
             market_ctx = get_market_context()
             _update_state(market_context=market_ctx)
 

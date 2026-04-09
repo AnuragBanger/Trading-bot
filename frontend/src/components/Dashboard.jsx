@@ -7,6 +7,7 @@ import RefinementLog from './RefinementLog';
 import GraduationStatus from './GraduationStatus';
 import CircuitBreaker from './CircuitBreaker';
 import HypothesisResearch from './HypothesisResearch';
+import LiveLog from './LiveLog';
 
 const NAV_ITEMS = [
   { id: 'overview',    label: 'PORTFOLIO' },
@@ -17,6 +18,7 @@ const NAV_ITEMS = [
   { id: 'graduation',  label: 'GRADUATION' },
   { id: 'circuit',     label: 'RISK GUARD' },
   { id: 'hypothesis',  label: 'HYPOTHESIS' },
+  { id: 'logs',        label: 'LIVE LOG' },
 ];
 
 const STATUS_COLORS = {
@@ -31,9 +33,8 @@ const CB_COLORS = {
   hard:   { bg: '#2a0a0a', border: '#f87171', text: '#f87171', label: '🚨 HARD STOP' },
 };
 
-export default function Dashboard({ data, lastRefresh, onRefresh, onTriggerCycle, apiBase }) {
-  const [activeTab, setActiveTab] = useState('overview');
-  const [cbStatus,  setCbStatus]  = useState(null);
+export default function Dashboard({ data, lastRefresh, cycleRunning, onRefresh, onTriggerCycle, apiBase, activeTab, setActiveTab }) {
+  const [cbStatus, setCbStatus] = useState(null);
 
   // Fetch circuit-breaker status independently (not in main dashboard poll)
   useEffect(() => {
@@ -126,10 +127,44 @@ export default function Dashboard({ data, lastRefresh, onRefresh, onTriggerCycle
           </div>
 
           {/* Action buttons */}
-          <button onClick={onRefresh} style={btnStyle('#1e293b', '#94a3b8')}>REFRESH</button>
-          <button onClick={onTriggerCycle} style={btnStyle('#0c1e40', '#00d4ff')}>▶ RUN CYCLE</button>
+          <button onClick={onRefresh} disabled={cycleRunning} style={btnStyle('#1e293b', cycleRunning ? '#334155' : '#94a3b8')}>REFRESH</button>
+          <button
+            onClick={onTriggerCycle}
+            disabled={cycleRunning}
+            style={{
+              ...btnStyle(cycleRunning ? '#0a1f0a' : '#0c1e40', cycleRunning ? '#22c55e' : '#00d4ff'),
+              animation: cycleRunning ? 'pulse 1.5s infinite' : 'none',
+              minWidth: 110,
+            }}
+          >
+            {cycleRunning ? '⟳ RUNNING…' : '▶ RUN CYCLE'}
+          </button>
         </div>
       </header>
+
+      {/* ── Cycle running banner ─────────────────────────────────────────── */}
+      {cycleRunning && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 12,
+          margin: '10px 0 0', padding: '10px 16px',
+          background: '#0a1f0a', border: '1px solid #166534',
+          borderRadius: 6,
+        }}>
+          <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#22c55e', boxShadow: '0 0 8px #22c55e', animation: 'pulse 1.5s infinite', flexShrink: 0 }} />
+          <div style={{ flex: 1 }}>
+            <span style={{ color: '#22c55e', fontSize: 12, letterSpacing: 1 }}>ANALYSIS CYCLE RUNNING</span>
+            <span style={{ color: '#4ade80', fontSize: 11, marginLeft: 12 }}>
+              Scanning watchlist → computing TA → sending to Claude AI → evaluating signals…
+            </span>
+          </div>
+          <button
+            onClick={() => setActiveTab('logs')}
+            style={{ ...btnStyle('#0a2a0a', '#4ade80'), fontSize: 10 }}
+          >
+            VIEW LOGS →
+          </button>
+        </div>
+      )}
 
       {/* ── Top-line KPIs ─────────────────────────────────────────────────── */}
       <TopKpis portfolio={data.portfolio} stats={data.stats} />
@@ -173,6 +208,7 @@ export default function Dashboard({ data, lastRefresh, onRefresh, onTriggerCycle
         {activeTab === 'graduation'  && <GraduationStatus graduation={data.graduation} />}
         {activeTab === 'circuit'     && <CircuitBreaker apiBase={apiBase} />}
         {activeTab === 'hypothesis'  && <HypothesisResearch apiBase={apiBase} />}
+        {activeTab === 'logs'        && <LiveLog apiBase={apiBase} />}
       </main>
 
       <style>{`
