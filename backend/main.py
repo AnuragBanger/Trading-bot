@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -199,6 +200,46 @@ async def market_context():
 async def get_parameters():
     """Current indicator weights and thresholds."""
     return _ok(load_parameters())
+
+
+@app.get("/api/circuit-breaker")
+async def circuit_breaker_status():
+    """Current circuit breaker state and drawdown metrics."""
+    from modules.circuit_breaker import get_circuit_breaker_status
+    return _ok(get_circuit_breaker_status())
+
+
+class HypothesisRequest(BaseModel):
+    thesis: str
+
+
+@app.post("/api/hypothesis")
+async def submit_hypothesis(body: HypothesisRequest):
+    """
+    Submit a market thesis. Claude researches relevant tickers and scores them.
+    High-confidence tickers (>= 70) are added to the hypothesis watchlist
+    for priority consideration in the next discovery cycle.
+    """
+    thesis = body.thesis.strip()
+    if not thesis:
+        raise HTTPException(status_code=400, detail="thesis is required")
+    if len(thesis) > 1000:
+        raise HTTPException(status_code=400, detail="thesis must be under 1000 characters")
+
+    from modules.hypothesis_engine import research_hypothesis
+    import asyncio
+    loop   = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, research_hypothesis, thesis)
+    return _ok(result)
+
+
+@app.get("/api/hypothesis/watchlist")
+async def hypothesis_watchlist():
+    """Return tickers currently on the hypothesis watchlist."""
+    trader   = PaperTrader()
+    pt_data  = trader.load()
+    watchlist = pt_data.get("portfolio", {}).get("hypothesis_watchlist", [])
+    return _ok(watchlist)
 
 
 @app.get("/health")

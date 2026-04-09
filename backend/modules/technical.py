@@ -114,6 +114,28 @@ class TechnicalAnalyzer:
         else:
             result.update({"avg_volume": None, "last_volume": None, "volume_ratio": 1.0, "volume_spike": False})
 
+        # ── ADX(14) — trend strength ─────────────────────────────────────────
+        adx_df = ta.adx(df["High"], df["Low"], df["Close"], length=14)
+        if adx_df is not None and not adx_df.empty:
+            adx_col = [c for c in adx_df.columns if c.startswith("ADX_")]
+            result["adx"] = round(float(adx_df[adx_col[0]].iloc[-1]), 2) if adx_col else None
+        else:
+            result["adx"] = None
+
+        # ── Stochastic(14,3) ─────────────────────────────────────────────────
+        stoch_df = ta.stoch(df["High"], df["Low"], df["Close"], k=14, d=3)
+        if stoch_df is not None and not stoch_df.empty:
+            k_col = [c for c in stoch_df.columns if "STOCHk" in c]
+            d_col = [c for c in stoch_df.columns if "STOCHd" in c]
+            result["stoch_k"] = round(float(stoch_df[k_col[0]].iloc[-1]), 2) if k_col else None
+            result["stoch_d"] = round(float(stoch_df[d_col[0]].iloc[-1]), 2) if d_col else None
+        else:
+            result["stoch_k"] = None
+            result["stoch_d"] = None
+
+        # ── Candlestick patterns (rule-based, no TA-Lib dependency) ──────────
+        result["candle_pattern"] = self._detect_candle_pattern(df)
+
         # ── Support / Resistance (rolling 20-period highs/lows) ──────────────
         if len(df) >= 20:
             result["support"]    = round(float(df["Low"].rolling(20).min().iloc[-1]), 4)
@@ -126,6 +148,73 @@ class TechnicalAnalyzer:
         return result
 
     # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _detect_candle_pattern(self, df: pd.DataFrame) -> str:
+        """
+        Detect common single- and two-candle patterns on the last 2 bars.
+        Returns a label string or "none".
+        """
+        if len(df) < 2:
+            return "none"
+
+        # Current candle
+        o, h, l, c = (
+            float(df["Open"].iloc[-1]),
+            float(df["High"].iloc[-1]),
+            float(df["Low"].iloc[-1]),
+            float(df["Close"].iloc[-1]),
+        )
+        # Previous candle
+        po, ph, pl, pc = (
+            float(df["Open"].iloc[-2]),
+            float(df["High"].iloc[-2]),
+            float(df["Low"].iloc[-2]),
+            float(df["Close"].iloc[-2]),
+        )
+
+        body     = abs(c - o)
+        rng      = h - l
+        if rng == 0:
+            return "none"
+
+        upper_wick = h - max(o, c)
+        lower_wick = min(o, c) - l
+
+        # ── Doji ─────────────────────────────────────────────────────────────
+        if body <= 0.1 * rng:
+            return "doji"
+
+        # ── Hammer (bullish reversal at bottom) ──────────────────────────────
+        # Green or red candle; lower wick ≥ 2× body; body in top 40% of range
+        if (lower_wick >= 2 * body
+                and upper_wick <= 0.3 * body
+                and min(o, c) >= l + 0.55 * rng):
+            return "bullish_hammer"
+
+        # ── Shooting Star (bearish reversal at top) ──────────────────────────
+        if (upper_wick >= 2 * body
+                and lower_wick <= 0.3 * body
+                and max(o, c) <= l + 0.45 * rng):
+            return "bearish_shooting_star"
+
+        # ── Bullish Engulfing ────────────────────────────────────────────────
+        prev_body = abs(pc - po)
+        if (c > o                          # today is green
+                and pc < po                # yesterday was red
+                and o <= pc                # today opens at or below yesterday close
+                and c >= po                # today closes at or above yesterday open
+                and body >= prev_body):
+            return "bullish_engulfing"
+
+        # ── Bearish Engulfing ────────────────────────────────────────────────
+        if (c < o                          # today is red
+                and pc > po                # yesterday was green
+                and o >= pc                # today opens at or above yesterday close
+                and c <= po                # today closes at or below yesterday open
+                and body >= prev_body):
+            return "bearish_engulfing"
+
+        return "none"
 
     def _fetch_ohlcv(self, ticker: str, period: str, interval: str) -> pd.DataFrame | None:
         try:
@@ -275,5 +364,28 @@ class TechnicalAnalyzer:
 
         if ta_data.get("volume_spike"):
             signals.append("volume_spike_1_5x")
+
+        # ── ADX trend strength ────────────────────────────────────────────────
+        adx = ta_data.get("adx")
+        if adx is not None:
+            if adx > 25:
+                signals.append("adx_trending")
+            elif adx < 20:
+                signals.append("adx_weak")
+
+        # ── Stochastic ────────────────────────────────────────────────────────
+        stoch_k = ta_data.get("stoch_k")
+        if stoch_k is not None:
+            if stoch_k < 20:
+                signals.append("stoch_oversold")
+            elif stoch_k > 80:
+                signals.append("stoch_overbought")
+
+        # ── Candlestick pattern ───────────────────────────────────────────────
+        pattern = ta_data.get("candle_pattern", "none")
+        if pattern in ("bullish_hammer", "bullish_engulfing"):
+            signals.append("bullish_reversal_candle")
+        elif pattern in ("bearish_shooting_star", "bearish_engulfing"):
+            signals.append("bearish_reversal_candle")
 
         return signals
