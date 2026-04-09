@@ -17,10 +17,10 @@ from fastapi.responses import JSONResponse
 # Ensure backend directory is on sys.path when running directly
 sys.path.insert(0, str(Path(__file__).parent))
 
-from config import FRONTEND_ORIGIN, load_json, load_parameters
+from config import FRONTEND_ORIGIN, load_json, save_json, load_parameters
 from config import (
     PAPER_TRADES_FILE, OUTCOMES_FILE,
-    REFINEMENT_LOG_FILE,
+    REFINEMENT_LOG_FILE, WATCHLIST_FILE,
 )
 from modules.outcome_tracker import OutcomeTracker
 from modules.paper_trader import PaperTrader
@@ -92,6 +92,7 @@ async def dashboard():
         "graduation":         grad,
         "market_open":        is_market_open(),
         "market_context":     sched.get("market_context", {}),
+        "current_regime":     sched.get("current_regime", {}),
         "last_signals":       last_sigs[-10:],   # last 10 signals
         "last_cycle":         sched.get("last_run"),
         "cycle_count":        sched.get("cycle_count", 0),
@@ -256,6 +257,102 @@ async def analytics_equity(limit: int = 500):
     from modules.db import get_db
     db = get_db()
     return _ok(db.get_equity_curve(limit=limit))
+
+
+@app.get("/api/regime")
+async def regime():
+    """Current market regime (bull/bear/sideways) and parameter overrides."""
+    sched = get_state()
+    return _ok(sched.get("current_regime", {}))
+
+
+# ── Watchlist management ──────────────────────────────────────────────────────
+
+class WatchlistAddRequest(BaseModel):
+    ticker: str
+    category: str = "custom"   # etfs | sp500_sample | nasdaq100_sample | custom
+
+
+@app.get("/api/watchlist")
+async def get_watchlist():
+    """Return the full watchlist with per-category counts."""
+    wl = load_json(WATCHLIST_FILE)
+    counts = {k: len(v) for k, v in wl.items() if isinstance(v, list)}
+    return _ok({"watchlist": wl, "counts": counts})
+
+
+@app.post("/api/watchlist")
+async def add_to_watchlist(body: WatchlistAddRequest):
+    """Add a ticker to the watchlist at runtime."""
+    from modules.discovery import add_ticker_to_watchlist
+    result = add_ticker_to_watchlist(body.ticker.upper().strip(), body.category)
+    return _ok(result)
+
+
+@app.delete("/api/watchlist/{ticker}")
+async def remove_from_watchlist(ticker: str):
+    """Remove a ticker from all watchlist categories."""
+    from modules.discovery import remove_ticker_from_watchlist
+    result = remove_ticker_from_watchlist(ticker)
+    if not result["removed"]:
+        raise HTTPException(status_code=404, detail=f"{ticker.upper()} not found in watchlist")
+    return _ok(result)
+
+
+# ── Graduation enforcement ────────────────────────────────────────────────────
+
+@app.post("/api/graduation/approve")
+async def graduation_approve():
+    """
+    Mark the bot as graduated (ready for real-money review) only when all
+    graduation criteria are met.  Sets portfolio.graduated = True.
+    """
+    tracker = OutcomeTracker()
+    grad    = tracker.graduation_status()
+
+    if grad["status"] != "ready":
+        unmet = [k for k, v in grad["criteria"].items() if not v["met"]]
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error":     "Graduation criteria not yet met",
+                "status":    grad["status"],
+                "met_count": grad["met_count"],
+                "unmet":     unmet,
+            },
+        )
+
+    data      = load_json(PAPER_TRADES_FILE)
+    portfolio = data["portfolio"]
+    if portfolio.get("graduated"):
+        return _ok({"message": "Already graduated", "graduated_at": portfolio.get("graduated_at")})
+
+    from datetime import datetime, timezone
+    portfolio["graduated"]    = True
+    portfolio["graduated_at"] = datetime.now(timezone.utc).isoformat()
+    save_json(PAPER_TRADES_FILE, data)
+
+    from modules.alerter import send_alert
+    send_alert(
+        "graduation_approved",
+        message="Bot manually approved for real-money trading review",
+        met_count=grad["met_count"],
+    )
+
+    return _ok({
+        "message":      "Graduation approved — bot is marked ready for real-money review.",
+        "graduated_at": portfolio["graduated_at"],
+        "criteria":     grad["criteria"],
+    })
+
+
+# ── Alerts ────────────────────────────────────────────────────────────────────
+
+@app.get("/api/alerts")
+async def get_alerts(limit: int = 50):
+    """Return the most recent alerts (circuit breaker, stop-loss, refinement, graduation)."""
+    from modules.alerter import get_alerts as _get_alerts
+    return _ok(_get_alerts(limit=limit))
 
 
 @app.get("/health")

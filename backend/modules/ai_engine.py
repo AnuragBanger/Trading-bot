@@ -75,10 +75,17 @@ def generate_signal(
     fa_data: dict,
     market_context: dict,
     key_signals: list[str],
+    regime: dict | None = None,
 ) -> dict[str, Any] | None:
     """
     Ask Claude for a trade signal.
     Returns parsed JSON dict or None on failure.
+
+    Parameters
+    ----------
+    regime : dict | None
+        Output of regime_detector.detect_regime(). Injected into system prompt
+        so Claude applies regime-appropriate signal logic.
     """
     params = load_parameters()
     outcomes_data = load_json(OUTCOMES_FILE)
@@ -100,7 +107,7 @@ def generate_signal(
     except Exception as exc:
         logger.warning("Weekly TA failed for %s: %s", ticker, exc)
 
-    system_prompt = _build_system_prompt(params, market_context, outcomes_data)
+    system_prompt = _build_system_prompt(params, market_context, outcomes_data, regime=regime)
     user_message  = _build_user_message(
         ticker, asset_type, ta_data, fa_data, key_signals,
         sentiment_data=sentiment_data,
@@ -133,7 +140,12 @@ def generate_signal(
     return None
 
 
-def _build_system_prompt(params: dict, market_context: dict, outcomes_data: dict) -> str:
+def _build_system_prompt(
+    params: dict,
+    market_context: dict,
+    outcomes_data: dict,
+    regime: dict | None = None,
+) -> str:
     stats = outcomes_data.get("stats", {})
     win_rate   = stats.get("win_rate", 0)
     avg_win    = stats.get("avg_win_pct", 0)
@@ -143,8 +155,26 @@ def _build_system_prompt(params: dict, market_context: dict, outcomes_data: dict
     spy_trend = market_context.get("SPY", {}).get("trend", "unknown")
     qqq_trend = market_context.get("QQQ", {}).get("trend", "unknown")
 
-    weights = params["indicator_weights"]
+    weights    = params["indicator_weights"]
     thresholds = params["thresholds"]
+
+    # Build regime section
+    if regime and regime.get("regime") != "unknown":
+        regime_name = regime["regime"].upper()
+        regime_desc = regime.get("description", "")
+        rov = regime.get("overrides", {})
+        regime_conf  = rov.get("min_confidence_to_trade", thresholds["min_confidence_to_trade"])
+        regime_pos   = rov.get("max_position_pct", thresholds["max_position_pct"])
+        regime_section = f"""
+CURRENT MARKET REGIME: {regime_name}
+- {regime_desc}
+- Regime-adjusted minimum confidence: {regime_conf}
+- Regime-adjusted max position: {regime_pos * 100:.0f}%
+- BEAR regime: be extra conservative — only "buy" on very high-conviction setups; prefer "hold".
+- BULL regime: standard momentum signals are valid; slight upward bias acceptable.
+- SIDEWAYS regime: favour mean-reversion (RSI, Bollinger Bands); avoid momentum breakouts."""
+    else:
+        regime_section = "\nMARKET REGIME: Unknown — apply standard conservative thresholds."
 
     return f"""You are an expert quantitative investment analyst for a paper-trading bot.
 Your role is to analyze technical and fundamental data and produce precise trade signals.
@@ -166,6 +196,7 @@ CURRENT THRESHOLDS:
 BROAD MARKET CONTEXT:
 - SPY trend: {spy_trend}
 - QQQ trend: {qqq_trend}
+{regime_section}
 
 RECENT BOT PERFORMANCE ({total_trades} closed trades):
 - Win rate: {win_rate:.1f}%

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, date, timezone
+from datetime import datetime, date, timedelta, timezone
 from typing import Any
 
 import yfinance as yf
@@ -104,6 +104,23 @@ class PaperTrader:
         # Guard: already holding this ticker
         if any(p["ticker"] == signal["ticker"] for p in positions):
             return None
+
+        # Guard: cooling-off period after a stop-loss exit
+        cooloff = portfolio.get("cooloff_tickers", {})
+        if signal["ticker"] in cooloff:
+            try:
+                expiry = datetime.fromisoformat(cooloff[signal["ticker"]])
+                if datetime.now(timezone.utc) < expiry:
+                    logger.info(
+                        "Skipping %s — cooling-off until %s",
+                        signal["ticker"], expiry.strftime("%Y-%m-%d %H:%M UTC"),
+                    )
+                    return None
+                # Cooloff expired — clean up
+                del cooloff[signal["ticker"]]
+                portfolio["cooloff_tickers"] = cooloff
+            except (ValueError, KeyError):
+                pass
 
         available = portfolio["available_cash"]
         if available <= 0:
@@ -316,6 +333,19 @@ class PaperTrader:
         portfolio["available_cash"]  += remaining_value
         portfolio["invested_amount"] -= pos["cost_basis"]
         portfolio["invested_amount"]  = max(0.0, portfolio["invested_amount"])
+
+        # Register cooling-off period for stop-loss exits so we don't immediately re-enter
+        if reason in ("stop_loss", "trailing_stop"):
+            params = load_parameters()
+            cooloff_hours = params.get("cooloff_hours", 72)
+            expiry = datetime.now(timezone.utc) + timedelta(hours=cooloff_hours)
+            cooloff = portfolio.setdefault("cooloff_tickers", {})
+            cooloff[pos["ticker"]] = expiry.isoformat()
+            logger.info(
+                "Cooling-off %s for %dh after %s exit (until %s)",
+                pos["ticker"], cooloff_hours, reason,
+                expiry.strftime("%Y-%m-%d %H:%M UTC"),
+            )
 
         closed = {
             "id":                    pos["id"],
