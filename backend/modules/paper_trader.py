@@ -23,6 +23,24 @@ logger = logging.getLogger(__name__)
 
 _HOLDING_PERIOD_DAYS = {"days": 5, "weeks": 21, "months": 63}
 
+# ── Slippage & commission constants ───────────────────────────────────────────
+_SLIPPAGE_NORMAL    = 0.001   # 0.10% for normal-vol stocks
+_SLIPPAGE_HIGH_VOL  = 0.003   # 0.30% for high-vol stocks (ATR > 2% of price)
+_COMMISSION_PER_SHARE = 0.01  # $0.01 per share
+_COMMISSION_MAX       = 6.95  # capped at $6.95 per trade
+
+
+def _slippage_factor(entry_price: float, atr: float | None) -> float:
+    """Return slippage fraction based on realised volatility."""
+    if atr and entry_price > 0 and (atr / entry_price) > 0.02:
+        return _SLIPPAGE_HIGH_VOL
+    return _SLIPPAGE_NORMAL
+
+
+def _commission(shares: float) -> float:
+    """Flat per-share commission capped at max."""
+    return min(shares * _COMMISSION_PER_SHARE, _COMMISSION_MAX)
+
 
 class PaperTrader:
     """Manage simulated portfolio positions."""
@@ -92,6 +110,10 @@ class PaperTrader:
             return None
 
         # Kelly Criterion position sizing (overrides Claude's flat suggestion)
+        # Circuit breaker may pass a lower max_pct via _cb_max_position
+        cb_max = signal.get("_cb_max_position", thresholds["max_position_pct"])
+        effective_max = min(cb_max, thresholds["max_position_pct"])
+
         outcomes_data = load_json(OUTCOMES_FILE)
         stats = outcomes_data.get("stats", {})
         ta_snap = signal.get("_ta_snapshot", {})
@@ -103,20 +125,30 @@ class PaperTrader:
             atr=ta_snap.get("atr"),
             current_price=ta_snap.get("current_price"),
             signal_confidence=float(signal.get("confidence", 70)),
-            max_pct=thresholds["max_position_pct"],
+            max_pct=effective_max,
         )
         size_pct   = kelly_pct
         total_value= portfolio["total_value"]
         budget     = total_value * size_pct
         budget     = min(budget, available)
 
-        entry_price = self._get_current_price(signal["ticker"])
-        if entry_price is None:
-            entry_price = signal.get("entry_zone", {}).get("low", 0)
-        if not entry_price or entry_price <= 0:
+        raw_price = self._get_current_price(signal["ticker"])
+        if raw_price is None:
+            raw_price = signal.get("entry_zone", {}).get("low", 0)
+        if not raw_price or raw_price <= 0:
             return None
 
+        # Apply slippage to simulate realistic fill price
+        slip = _slippage_factor(raw_price, ta_snap.get("atr"))
+        entry_price = round(raw_price * (1.0 + slip), 4)
+
+        # Shares based on slippage-adjusted price
         shares = budget / entry_price
+
+        # Commission reduces effective budget
+        comm = _commission(shares)
+        if comm > available - (shares * entry_price):
+            comm = 0.0   # safety: skip commission if it would overdraw
 
         position = {
             "id":             str(uuid.uuid4()),
@@ -140,22 +172,27 @@ class PaperTrader:
             "key_signals":    signal.get("key_signals", []),
             "risk_level":     signal.get("risk_level", "medium"),
             "tp1_hit":        False,
+            "trailing_stop_active":    False,
             "stop_moved_to_breakeven": False,
             "partial_sold_shares": 0.0,
             "partial_sold_value":  0.0,
+            "slippage_cost":  round(shares * raw_price * slip, 2),
+            "commission_cost": round(comm, 2),
             # snapshot of indicators at entry (for outcome tracking)
             "indicators_at_entry": signal.get("_ta_snapshot", {}),
         }
 
-        portfolio["available_cash"]  -= position["cost_basis"]
+        portfolio["available_cash"]  -= position["cost_basis"] + comm
         portfolio["invested_amount"] += position["cost_basis"]
         positions.append(position)
         self._refresh_portfolio_totals(data)
         self.save(data)
 
         logger.info(
-            "Opened position: %s @ $%.4f, %g shares, cost $%.2f (Kelly size=%.1f%%)",
-            position["ticker"], entry_price, shares, position["cost_basis"], size_pct * 100,
+            "Opened position: %s @ $%.4f (slip=%.1fbps), %g shares, cost $%.2f "
+            "(Kelly=%.1f%%, comm=$%.2f)",
+            position["ticker"], entry_price, slip * 10_000, shares,
+            position["cost_basis"], size_pct * 100, comm,
         )
         return position
 
@@ -206,27 +243,54 @@ class PaperTrader:
         tp2       = pos.get("take_profit_2")
         sl        = pos.get("stop_loss")
 
+        # ── Ratchet trailing stop upward each cycle (after TP1) ─────────────
+        if pos.get("trailing_stop_active") and sl:
+            atr = pos.get("indicators_at_entry", {}).get("atr")
+            if atr and price > 0:
+                new_trail = price - 1.5 * atr   # = price × (1 - 1.5×ATR/price)
+                if new_trail > sl:
+                    pos["stop_loss"] = round(new_trail, 4)
+                    sl = pos["stop_loss"]
+
         # ── Stop-loss ────────────────────────────────────────────────────────
         if sl and price <= sl:
-            return self._close_position(pos, price, "stop_loss", data)
+            reason = "trailing_stop" if pos.get("trailing_stop_active") else "stop_loss"
+            return self._close_position(pos, price, reason, data)
 
         # ── Take-profit target 2 (close remaining) ────────────────────────────
         if tp2 and price >= tp2:
             return self._close_position(pos, price, "target_2", data)
 
-        # ── Take-profit target 1 (sell 50%, move stop to breakeven) ──────────
+        # ── Take-profit target 1 (sell 50%, set ATR-based trailing stop) ──────
         if tp1 and price >= tp1 and not pos["tp1_hit"]:
             half_shares = pos["shares"] / 2
             sale_value  = half_shares * price
             pos["shares"]             -= half_shares
-            pos["cost_basis"]         -= half_shares * entry  # reduce cost basis proportionally
+            pos["cost_basis"]         -= half_shares * entry
             pos["partial_sold_shares"]+= half_shares
             pos["partial_sold_value"] += sale_value
             pos["tp1_hit"]             = True
             pos["stop_moved_to_breakeven"] = True
-            pos["stop_loss"]           = entry  # move stop to breakeven
-            portfolio["available_cash"]+= sale_value
-            logger.info("TP1 hit for %s: sold 50%% at $%.4f, stop moved to breakeven", pos["ticker"], price)
+
+            # ATR-based trailing stop (at least at entry / breakeven)
+            atr = pos.get("indicators_at_entry", {}).get("atr")
+            if atr and price > 0:
+                trail = price - 1.5 * atr
+                pos["stop_loss"] = round(max(trail, entry), 4)
+                pos["trailing_stop_active"] = True
+                logger.info(
+                    "TP1 hit %s @ $%.4f — trailing stop set at $%.4f",
+                    pos["ticker"], price, pos["stop_loss"],
+                )
+            else:
+                pos["stop_loss"] = entry   # fallback: breakeven
+                pos["trailing_stop_active"] = False
+                logger.info(
+                    "TP1 hit %s @ $%.4f — stop moved to breakeven $%.4f",
+                    pos["ticker"], price, entry,
+                )
+
+            portfolio["available_cash"] += sale_value
             return None
 
         # ── Holding period timeout ────────────────────────────────────────────

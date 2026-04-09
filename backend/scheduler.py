@@ -22,6 +22,8 @@ from modules.ai_engine import generate_signal, get_market_context
 from modules.paper_trader import PaperTrader
 from modules.outcome_tracker import OutcomeTracker
 from modules.refiner import Refiner
+from modules.circuit_breaker import get_circuit_breaker_status
+from modules.correlation_guard import check_correlation
 
 logger = logging.getLogger(__name__)
 
@@ -75,12 +77,13 @@ def run_cycle() -> dict[str, Any]:
 
     _update_state(is_running=True, last_run=datetime.now(timezone.utc).isoformat())
     summary: dict[str, Any] = {
-        "started_at":      _state["last_run"],
-        "market_open":     is_market_open(),
+        "started_at":        _state["last_run"],
+        "market_open":       is_market_open(),
         "signals_generated": [],
         "positions_opened":  [],
         "positions_closed":  [],
         "refinement_run":    False,
+        "circuit_breaker":   "normal",
         "errors":            [],
     }
 
@@ -109,9 +112,24 @@ def run_cycle() -> dict[str, Any]:
             market_ctx = get_market_context()
             _update_state(market_context=market_ctx)
 
+            # ── Circuit breaker check ─────────────────────────────────────
+            cb = get_circuit_breaker_status()
+            summary["circuit_breaker"] = cb["status"]
+            if cb["status"] != "normal":
+                logger.warning("Circuit breaker [%s]: %s", cb["status"], cb["message"])
+
             portfolio   = trader.load()
             active_set  = {p["ticker"] for p in portfolio["active_positions"]}
+            active_pos  = portfolio["active_positions"]
             params      = load_parameters()
+
+            # Apply circuit breaker overrides to thresholds for this cycle
+            min_confidence = params["thresholds"]["min_confidence_to_trade"]
+            max_position   = params["thresholds"]["max_position_pct"]
+            if cb["min_confidence_override"] is not None:
+                min_confidence = cb["min_confidence_override"]
+            if cb["max_position_override"] is not None:
+                max_position = cb["max_position_override"]
 
             discovery   = DiscoveryModule()
             ta_analyzer = TechnicalAnalyzer()
@@ -142,10 +160,23 @@ def run_cycle() -> dict[str, Any]:
 
                         if (
                             signal.get("signal") == "buy"
-                            and signal.get("confidence", 0) >= params["thresholds"]["min_confidence_to_trade"]
+                            and signal.get("confidence", 0) >= min_confidence
+                            and not cb["new_opens_blocked"]
                         ):
+                            # Correlation / sector guard before opening
+                            corr = check_correlation(ticker, active_pos)
+                            if not corr["allowed"]:
+                                logger.info(
+                                    "Skipping %s — correlation guard: %s",
+                                    ticker, corr["reason"],
+                                )
+                                continue
+
+                            # Pass circuit-breaker max_position to signal
+                            signal["_cb_max_position"] = max_position
                             pos = trader.open_position(signal)
                             if pos:
+                                active_pos.append(pos)  # keep local list in sync
                                 summary["positions_opened"].append({
                                     "ticker": ticker,
                                     "entry":  pos["entry_price"],
