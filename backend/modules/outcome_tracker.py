@@ -5,6 +5,8 @@ Records closed trades, calculates win rates, and tracks performance metrics.
 from __future__ import annotations
 
 import logging
+import math
+import statistics
 from datetime import datetime, timezone
 from typing import Any
 
@@ -92,18 +94,28 @@ class OutcomeTracker:
         # Criterion 4: Min 20 closed trades
         criterion_trades = total >= 20
 
+        # Criterion 5: Sharpe Ratio > 1.0
+        sharpe = stats.get("sharpe_ratio")
+        criterion_sharpe = (sharpe is not None and sharpe > 1.0)
+
+        # Criterion 6: Profit Factor > 1.3
+        pf = stats.get("profit_factor")
+        criterion_pf = (pf is not None and pf > 1.3)
+
         criteria = {
             "win_rate_60_pct":          {"met": criterion_winrate,  "value": round(last20_win_rate, 1), "target": 60.0},
             "avg_loss_under_15_pct":    {"met": criterion_loss,     "value": round(avg_loss, 1),       "target": 15.0},
             "profitable_2_months":      {"met": criterion_months,   "value": consec,                   "target": 2},
             "min_20_closed_trades":     {"met": criterion_trades,   "value": total,                    "target": 20},
+            "sharpe_ratio_over_1":      {"met": criterion_sharpe,   "value": sharpe,                   "target": 1.0},
+            "profit_factor_over_1_3":   {"met": criterion_pf,       "value": pf,                       "target": 1.3},
         }
 
         met_count = sum(1 for c in criteria.values() if c["met"])
 
-        if met_count == 4:
+        if met_count == 6:
             status = "ready"
-        elif met_count >= 2:
+        elif met_count >= 3:
             status = "improving"
         else:
             status = "learning"
@@ -114,13 +126,15 @@ class OutcomeTracker:
             "status":           status,
             "criteria":         criteria,
             "met_count":        met_count,
-            "total_criteria":   4,
+            "total_criteria":   6,
             "trades_remaining": trades_remaining,
             "overall_win_rate": stats.get("win_rate", 0.0),
             "last20_win_rate":  round(last20_win_rate, 1),
             "avg_win_pct":      stats.get("avg_win_pct", 0.0),
             "avg_loss_pct":     stats.get("avg_loss_pct", 0.0),
             "total_trades":     total,
+            "sharpe_ratio":     sharpe,
+            "profit_factor":    pf,
         }
 
     # ── Internal stats computation ────────────────────────────────────────────
@@ -195,6 +209,9 @@ class OutcomeTracker:
         if new_trades > 0:
             trades_since = min(trades_since + new_trades, REFINEMENT_TRIGGER_TRADES + 1)
 
+        # ── Risk-adjusted metrics ─────────────────────────────────────────────
+        risk_metrics = self._compute_risk_metrics(trades)
+
         return {
             "total_trades":                  total,
             "winning_trades":                len(wins),
@@ -208,6 +225,126 @@ class OutcomeTracker:
             "by_market_condition":           self._by_market_condition(trades),
             "monthly_performance":           monthly_list,
             "trades_since_last_refinement":  trades_since,
+            **risk_metrics,
+        }
+
+    def _compute_risk_metrics(self, trades: list[dict]) -> dict:
+        """
+        Compute risk-adjusted performance metrics from closed trade history.
+        Returns a dict with sharpe_ratio, sortino_ratio, profit_factor,
+        max_drawdown_pct, max_drawdown_duration_trades, max_consecutive_wins,
+        max_consecutive_losses, and expectancy_pct.
+        """
+        empty = {
+            "sharpe_ratio":                 None,
+            "sortino_ratio":                None,
+            "profit_factor":                None,
+            "max_drawdown_pct":             None,
+            "max_drawdown_duration_trades": None,
+            "max_consecutive_wins":         0,
+            "max_consecutive_losses":       0,
+            "expectancy_pct":               None,
+        }
+        if len(trades) < 2:
+            return empty
+
+        returns = [t["pct_change"] for t in trades]
+
+        # Estimate average holding period for annualization
+        holding_days: list[float] = []
+        for t in trades:
+            try:
+                entry = datetime.fromisoformat(t["entry_date"])
+                exit_ = datetime.fromisoformat(t["exit_date"])
+                holding_days.append(max(1, (exit_ - entry).days))
+            except Exception:
+                holding_days.append(7)
+        avg_days = statistics.mean(holding_days) if holding_days else 7.0
+        ann_factor = math.sqrt(252 / avg_days)
+
+        # Risk-free rate per average trade holding period (4% annual)
+        rf_per_trade = 0.04 * (avg_days / 252)
+
+        mean_ret = statistics.mean(returns)
+        std_ret  = statistics.stdev(returns)
+
+        # ── Sharpe ───────────────────────────────────────────────────────────
+        sharpe = (
+            round((mean_ret - rf_per_trade) / std_ret * ann_factor, 3)
+            if std_ret > 0 else None
+        )
+
+        # ── Sortino (downside std only) ───────────────────────────────────────
+        downside = [r for r in returns if r < rf_per_trade]
+        sortino = None
+        if len(downside) >= 2:
+            down_std = statistics.stdev(downside)
+            if down_std > 0:
+                sortino = round((mean_ret - rf_per_trade) / down_std * ann_factor, 3)
+
+        # ── Profit Factor ─────────────────────────────────────────────────────
+        gross_win  = sum(r for r in returns if r > 0)
+        gross_loss = abs(sum(r for r in returns if r < 0))
+        profit_factor = round(gross_win / gross_loss, 3) if gross_loss > 0 else None
+
+        # ── Max Drawdown (from cumulative pct return sequence) ────────────────
+        cumulative = 0.0
+        peak       = 0.0
+        max_dd     = 0.0
+        dd_start: int | None = None
+        max_dd_dur = 0
+        cur_dur    = 0
+        for i, r in enumerate(returns):
+            cumulative += r
+            if cumulative > peak:
+                peak = cumulative
+                if dd_start is not None:
+                    max_dd_dur = max(max_dd_dur, cur_dur)
+                dd_start = None
+                cur_dur  = 0
+            else:
+                if dd_start is None:
+                    dd_start = i
+                cur_dur += 1
+                dd = peak - cumulative
+                if dd > max_dd:
+                    max_dd = dd
+        if dd_start is not None:
+            max_dd_dur = max(max_dd_dur, cur_dur)
+
+        # ── Consecutive win/loss streaks ──────────────────────────────────────
+        max_consec_wins   = 0
+        max_consec_losses = 0
+        cur_win  = 0
+        cur_loss = 0
+        for t in trades:
+            if t["was_correct"]:
+                cur_win  += 1
+                cur_loss  = 0
+            else:
+                cur_loss += 1
+                cur_win   = 0
+            max_consec_wins   = max(max_consec_wins, cur_win)
+            max_consec_losses = max(max_consec_losses, cur_loss)
+
+        # ── Expectancy per trade ──────────────────────────────────────────────
+        total    = len(trades)
+        win_rate = sum(1 for t in trades if t["was_correct"]) / total
+        pos_ret  = [r for r in returns if r > 0]
+        neg_ret  = [r for r in returns if r < 0]
+        avg_win_r  = statistics.mean(pos_ret) if pos_ret else 0.0
+        avg_loss_r = abs(statistics.mean(neg_ret)) if neg_ret else 0.0
+        expectancy = round(win_rate * avg_win_r - (1 - win_rate) * avg_loss_r, 3)
+
+        return {
+            "sharpe_ratio":                 sharpe,
+            "sortino_ratio":                sortino,
+            "profit_factor":                profit_factor,
+            "max_drawdown_pct":             round(max_dd, 2),
+            "max_drawdown_duration_trades": max_dd_dur,
+            "max_consecutive_wins":         max_consec_wins,
+            "max_consecutive_losses":       max_consec_losses,
+            "expectancy_pct":               expectancy,
         }
 
     def _by_market_condition(self, trades: list[dict]) -> dict:

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
@@ -137,6 +138,8 @@ JSON SCHEMA:
             for sig, v in by_indicator.items()
         )
 
+        attribution = self._compute_signal_attribution(trades)
+
         trades_summary = []
         for t in trades:
             trades_summary.append({
@@ -148,6 +151,21 @@ JSON SCHEMA:
                 "key_signals": t.get("key_signals", []),
             })
 
+        risk_section = ""
+        sharpe = stats.get("sharpe_ratio")
+        pf     = stats.get("profit_factor")
+        exp    = stats.get("expectancy_pct")
+        max_dd = stats.get("max_drawdown_pct")
+        if any(v is not None for v in (sharpe, pf, exp, max_dd)):
+            risk_section = (
+                f"\nRISK-ADJUSTED METRICS:\n"
+                f"- Sharpe Ratio: {sharpe}\n"
+                f"- Profit Factor: {pf}\n"
+                f"- Expectancy per trade: {exp}%\n"
+                f"- Max Drawdown: {max_dd}%\n"
+                f"- Max consecutive losses: {stats.get('max_consecutive_losses', 'N/A')}\n"
+            )
+
         return f"""Analyze these {len(trades)} recent trades and refine the parameters to improve performance.
 
 CURRENT PARAMETERS:
@@ -158,20 +176,76 @@ OVERALL STATS:
 - Avg win: {stats.get('avg_win_pct', 0)}%
 - Avg loss: {stats.get('avg_loss_pct', 0)}%
 - Total trades: {stats.get('total_trades', 0)}
-
-INDICATOR WIN RATES:
+{risk_section}
+INDICATOR WIN RATES (all trades):
 {indicator_summary or '  No indicator data yet'}
+
+SIGNAL ATTRIBUTION (causal analysis):
+{attribution}
 
 RECENT TRADE OUTCOMES:
 {json.dumps(trades_summary, indent=2)}
 
 Based on this data:
-1. Increase weights for indicators that correlate with winning trades
-2. Decrease weights for indicators that correlate with losing trades
+1. Increase weights for indicators that appear in winning trades and signal combinations
+2. Decrease weights for indicators with low standalone win rates
 3. Adjust thresholds to filter out low-confidence trades that are losing
-4. Provide clear reasoning for each change
+4. If Sharpe < 1.0 or Profit Factor < 1.3, tighten confidence thresholds
+5. Provide clear reasoning for each change
 
 Respond with the updated parameters JSON now."""
+
+    def _compute_signal_attribution(self, trades: list[dict]) -> str:
+        """
+        Compute standalone and combination win rates for each signal.
+        Returns a formatted string for the Claude refinement prompt.
+        """
+        # Individual signal stats
+        sig_stats: dict[str, dict] = defaultdict(lambda: {"wins": 0, "total": 0})
+        for t in trades:
+            for sig in t.get("key_signals", []):
+                sig_stats[sig]["total"] += 1
+                if t["was_correct"]:
+                    sig_stats[sig]["wins"] += 1
+
+        # Two-signal combination stats
+        combo_stats: dict[str, dict] = defaultdict(lambda: {"wins": 0, "total": 0})
+        for t in trades:
+            signals = sorted(t.get("key_signals", []))
+            for i, s1 in enumerate(signals):
+                for s2 in signals[i + 1:]:
+                    combo = f"{s1}+{s2}"
+                    combo_stats[combo]["total"] += 1
+                    if t["was_correct"]:
+                        combo_stats[combo]["wins"] += 1
+
+        lines: list[str] = []
+
+        # Individual signals sorted by win rate (min 2 trades)
+        ranked_sigs = sorted(
+            [(s, v) for s, v in sig_stats.items() if v["total"] >= 2],
+            key=lambda x: x[1]["wins"] / x[1]["total"],
+            reverse=True,
+        )
+        if ranked_sigs:
+            lines.append("Individual signals (by win rate):")
+            for sig, v in ranked_sigs[:8]:
+                wr = round(v["wins"] / v["total"] * 100, 1)
+                lines.append(f"  {sig}: {wr}% win rate ({v['wins']}/{v['total']})")
+
+        # Best 2-signal combinations (min 2 trades)
+        ranked_combos = sorted(
+            [(c, v) for c, v in combo_stats.items() if v["total"] >= 2],
+            key=lambda x: x[1]["wins"] / x[1]["total"],
+            reverse=True,
+        )
+        if ranked_combos:
+            lines.append("Best 2-signal combinations:")
+            for combo, v in ranked_combos[:5]:
+                wr = round(v["wins"] / v["total"] * 100, 1)
+                lines.append(f"  {combo}: {wr}% ({v['wins']}/{v['total']})")
+
+        return "\n".join(lines) if lines else "  Insufficient data for attribution"
 
     # ── Validation ────────────────────────────────────────────────────────────
 

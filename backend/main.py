@@ -242,6 +242,22 @@ async def hypothesis_watchlist():
     return _ok(watchlist)
 
 
+@app.get("/api/analytics/signals")
+async def analytics_signals():
+    """Win rate per signal type from the SQLite outcomes table."""
+    from modules.db import get_db
+    db = get_db()
+    return _ok(db.win_rate_by_signal())
+
+
+@app.get("/api/analytics/equity")
+async def analytics_equity(limit: int = 500):
+    """Equity curve time-series from SQLite (faster than JSON for large histories)."""
+    from modules.db import get_db
+    db = get_db()
+    return _ok(db.get_equity_curve(limit=limit))
+
+
 @app.get("/health")
 async def health():
     return {"status": "healthy"}
